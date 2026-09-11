@@ -349,17 +349,22 @@ function tierBadge(p,small=false){return `<span class="${small?"tierBadgeSm":"ti
 function statusBadge(s){return `<span class="badge ${s}">${STATUS_LABEL[s]}</span>`}
 function icon(name,size=14){return `<i data-lucide="${name}" width="${size}" height="${size}"></i>`}
 
-function addPlayer(){
+async function addPlayer(){
  const name=newName.trim(); if(!name)return;
  if(isGuest&&!guestOf){alert("게스트를 데려온 회원을 선택해주세요.");return}
- let memberId=null;
+ let memberId=null,createdRosterMember=null;
  if(saveToRoster&&!isGuest){
   const existing=members.find(m=>m.name===name);
   if(existing){memberId=existing.id}
-  else{const m={id:memberNextId++,name,tier:newTier,gender:newGender};members.push(m);memberId=m.id}
+  else{
+   const m={id:await allocateId("members",false),name,tier:newTier,gender:newGender};
+   members.push(m);memberId=m.id;createdRosterMember=m;
+  }
  }
- const p={id:nextId++,name,tier:newTier,gender:newGender,guestOf:isGuest?guestOf:null,memberId,games:0,status:"waiting",courtId:null,waitSince:Date.now()};
- players.push(p);newName="";isGuest=false;guestOf="";save();render();
+ const p={id:await allocateId("players"),name,tier:newTier,gender:newGender,guestOf:isGuest?guestOf:null,memberId,games:0,status:"waiting",courtId:null,waitSince:Date.now()};
+ players.push(p);
+ if(createdRosterMember)await saveRosterMember(createdRosterMember);
+ newName="";isGuest=false;guestOf="";await save();render();
 }
 function removePlayer(id){players=players.filter(p=>p.id!==id);save();render()}
 function clearAllPlayers(){
@@ -371,25 +376,26 @@ function clearAllPlayers(){
  assigningCourtId=null;isBuildingGroup=false;buildingGroupSelection=[];
  save();render();
 }
-function addMember(){
+async function addMember(){
  const name=newMemberName.trim(); if(!name)return;
- members.push({id:memberNextId++,name,tier:newMemberTier,gender:newMemberGender});
- newMemberName="";save();render();
+ const m={id:await allocateId("members",false),name,tier:newMemberTier,gender:newMemberGender};
+ members.push(m);await saveRosterMember(m);
+ newMemberName="";render();
 }
-function removeMember(id){members=members.filter(m=>m.id!==id);save();render()}
-function addMemberToday(memberId){
- const m=members.find(x=>x.id===memberId);
- if(!m||players.some(p=>p.memberId===memberId))return;
- players.push({id:nextId++,name:m.name,tier:m.tier,gender:m.gender,guestOf:null,memberId:m.id,games:0,status:"waiting",courtId:null,waitSince:Date.now()});
- save();render();
+async function removeMember(id){members=members.filter(m=>String(m.id)!==String(id));await removeRosterMember(id);render()}
+async function addMemberToday(memberId){
+ const m=members.find(x=>String(x.id)===String(memberId));
+ if(!m||players.some(p=>String(p.memberId)===String(memberId)))return;
+ players.push({id:await allocateId("players"),name:m.name,tier:m.tier,gender:m.gender,guestOf:null,memberId:m.id,games:0,status:"waiting",courtId:null,waitSince:Date.now()});
+ await save();render();
 }
-function addAllMembersToday(){
- members.forEach(m=>{
-  if(!players.some(p=>p.memberId===m.id)){
-   players.push({id:nextId++,name:m.name,tier:m.tier,gender:m.gender,guestOf:null,memberId:m.id,games:0,status:"waiting",courtId:null,waitSince:Date.now()});
+async function addAllMembersToday(){
+ for(const m of members){
+  if(!players.some(p=>String(p.memberId)===String(m.id))){
+   players.push({id:await allocateId("players"),name:m.name,tier:m.tier,gender:m.gender,guestOf:null,memberId:m.id,games:0,status:"waiting",courtId:null,waitSince:Date.now()});
   }
- });
- save();render();
+ }
+ await save();render();
 }
 function toggleRest(id){
  players=players.map(p=>p.id!==id?p:(p.status==="waiting"?{...p,status:"resting"}:p.status==="resting"?{...p,status:"waiting",waitSince:Date.now()}:p));
@@ -500,15 +506,15 @@ function endGame(courtId){
  save();render();
 }
 function beginBuildGroup(){assigningCourtId=null;isBuildingGroup=true;buildingGroupSelection=[];render()}
-function addToGroupBuilder(playerId){
+async function addToGroupBuilder(playerId){
  if(buildingGroupSelection.includes(playerId)||buildingGroupSelection.length>=4)return;
  buildingGroupSelection=[...buildingGroupSelection,playerId];
  players=players.map(p=>p.id===playerId?{...p,status:"grouped"}:p);
  if(buildingGroupSelection.length===4){
-  waitingGroups.push({id:groupNextId++,playerIds:buildingGroupSelection});
+  waitingGroups.push({id:await allocateId("groups"),playerIds:buildingGroupSelection});
   buildingGroupSelection=[];isBuildingGroup=false;
  }
- save();render();
+ await save();render();
 }
 function removeFromGroupBuilder(playerId){
  buildingGroupSelection=buildingGroupSelection.filter(id=>id!==playerId);
@@ -658,41 +664,52 @@ function renderStats(){
 
 
 
+function applySessionData(d){
+ const data=d||{};
+ players=Array.isArray(data.players)?data.players:[];
+ courts=Array.isArray(data.courts)&&data.courts.length?data.courts:initCourts(2);
+ overlap=data.overlap&&typeof data.overlap==="object"?data.overlap:{};
+ waitingGroups=Array.isArray(data.waitingGroups)?data.waitingGroups:[];
+}
+function applyRosterData(d){
+ const data=d||{};
+ if(Array.isArray(data))members=data;
+ else if(data&&typeof data==="object")members=Object.values(data);
+ else members=[];
+}
+async function ensureRoomAccess(fb){
+ if(!currentUser)throw new Error("Firebase 사용자 인증이 완료되지 않았습니다.");
+ const memberRef=fb.ref(fb.firebaseDB,accessPath(inviteCode,currentUser.uid));
+ const snap=await fb.get(memberRef);
+ if(!snap.exists()){
+  await fb.update(memberRef,{uid:currentUser.uid,roomCode:inviteCode,joinedAt:Date.now(),authProvider:"anonymous"});
+ }
+}
 async function load(){
  try{
   const fb=window.gameMatchingFirebase;
-  gameRef=fb.ref(fb.firebaseDB,roomPath(inviteCode));
-  const snap=await fb.get(gameRef);
-  if(snap.exists()){
-   const d=snap.val()||{};
-   players=Array.isArray(d.players)?d.players:[];
-   courts=Array.isArray(d.courts)&&d.courts.length?d.courts:initCourts(2);
-   overlap=d.overlap||{};
-   members=Array.isArray(d.members)?d.members:[];
-   waitingGroups=Array.isArray(d.waitingGroups)?d.waitingGroups:[];
-   nextId=players.reduce((m,p)=>Math.max(m,Number(p.id)||0),0)+1;
-   memberNextId=members.reduce((m,x)=>Math.max(m,Number(x.id)||0),0)+1;
-   groupNextId=waitingGroups.reduce((m,x)=>Math.max(m,Number(x.id)||0),0)+1;
-  }
-  loaded=true;
-  render();
-  fb.onValue(gameRef,(snap)=>{
-   if(!snap.exists())return;
-   const d=snap.val()||{};
-   players=Array.isArray(d.players)?d.players:[];
-   courts=Array.isArray(d.courts)&&d.courts.length?d.courts:initCourts(2);
-   overlap=d.overlap||{};
-   members=Array.isArray(d.members)?d.members:[];
-   waitingGroups=Array.isArray(d.waitingGroups)?d.waitingGroups:[];
-   nextId=players.reduce((m,p)=>Math.max(m,Number(p.id)||0),0)+1;
-   memberNextId=members.reduce((m,x)=>Math.max(m,Number(x.id)||0),0)+1;
-   groupNextId=waitingGroups.reduce((m,x)=>Math.max(m,Number(x.id)||0),0)+1;
-   loaded=true;
+  if(!fb?.firebaseAuth)throw new Error("Firebase Authentication 설정을 찾을 수 없습니다.");
+  const credential=await fb.signInAnonymously(fb.firebaseAuth);
+  currentUser=credential.user;
+  gameRef=fb.ref(fb.firebaseDB,sessionPath(inviteCode,sessionDate));
+  rosterRef=fb.ref(fb.firebaseDB,rosterPath(inviteCode));
+  await ensureRoomAccess(fb);
+  const [sessionSnap,rosterSnap]=await Promise.all([fb.get(gameRef),fb.get(rosterRef)]);
+  applySessionData(sessionSnap.exists()?sessionSnap.val():{});
+  applyRosterData(rosterSnap.exists()?rosterSnap.val():{});
+  loaded=true;authError="";render();
+  fb.onValue(gameRef,snap=>{
+   applySessionData(snap.exists()?snap.val():{});
+   loaded=true;render();
+  });
+  fb.onValue(rosterRef,snap=>{
+   applyRosterData(snap.exists()?snap.val():{});
    render();
   });
  }catch(e){
-  console.error("Firebase 불러오기 실패:",e);
-  loaded=true;
+  console.error("Firebase 인증·불러오기 실패:",e);
+  loaded=false;
+  authError=e?.message||"Firebase 연결 또는 인증에 실패했습니다.";
   render();
  }
 }
