@@ -24,6 +24,9 @@ button{cursor:pointer}
 .inviteCopyBtn{background:#EAF5EF;color:#1B5E45}
 .inviteJoinBtn{background:#1B5E45;color:#fff}
 .inviteJoinInput{width:104px;border:1px solid #E1E7E2;border-radius:7px;padding:6px 8px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;text-transform:uppercase;outline:none}
+.sessionPanel{display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #E1E7E2;border:1px solid #E1E7E2;border-radius:10px;padding:4px 6px}
+.sessionLabel{font-size:11.5px;color:#7C8B84}
+.sessionDateInput{border:1px solid #E1E7E2;border-radius:7px;padding:6px 8px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#16231F;background:#fff}
 .shuttleIcon{width:42px;height:42px;border-radius:10px;background:#1B5E45;display:flex;align-items:center;justify-content:center;font-size:20px}
 .title{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:700;line-height:1.2}
 .subtitle{font-size:12.5px;color:#7C8B84;margin-top:2px}
@@ -153,7 +156,8 @@ button{cursor:pointer}
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-app.js";
-import { getDatabase, ref, get, set, onValue } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-database.js";
+import { getDatabase, ref, get, update, onValue, runTransaction } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-database.js";
+import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.1.0/firebase-auth.js";
 const firebaseConfig = {
   apiKey: "AIzaSyBTfNwe0ia9CN9gFCq2_G39Hea8aS9K9Nk",
   authDomain: "tingtongame.firebaseapp.com",
@@ -166,13 +170,15 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const firebaseDB = getDatabase(firebaseApp);
-window.gameMatchingFirebase = { firebaseDB, ref, get, set, onValue };
+const firebaseAuth = getAuth(firebaseApp);
+window.gameMatchingFirebase = { firebaseDB, firebaseAuth, ref, get, update, onValue, runTransaction, signInAnonymously };
 if (typeof window.load === "function") { window.load(); } else { window.addEventListener("DOMContentLoaded", () => window.load && window.load()); }
 </script>
 <script>
 const GREEN="#1B5E45", GREEN_DARK="#123B2D", AMBER="#E8A33D", INK="#16231F", MUTED="#7C8B84";
 const TIER_OPTIONS=["S","A","B","C","D","초심","왕초심"];
 const TIER_COLOR={S:"#C24A3B",A:"#C2683B",B:"#B08900",C:"#1B5E45",D:"#3B6FA0","초심":"#7C8B84","왕초심":"#9A8B7C"};
+const TIER_RANK={S:6,A:5,B:4,C:3,D:2,"초심":1,"왕초심":0};
 const GENDER_COLOR={M:"#8B5CF6",F:"#D4A017"};
 const STATUS_LABEL={waiting:"대기 중",resting:"쉬는 중",playing:"경기 중",queued:"다음 대기",grouped:"대기조"};
 
@@ -199,6 +205,47 @@ let inviteCode=readInviteCode();
 if(!inviteCode){inviteCode=generateInviteCode();setInviteCodeInUrl(inviteCode);}
 let joinCode="";
 function roomPath(code){return "gamematching_v1/rooms/"+code;}
+
+function localDateKey(date=new Date()){
+ const y=date.getFullYear(),m=String(date.getMonth()+1).padStart(2,"0"),d=String(date.getDate()).padStart(2,"0");
+ return y+"-"+m+"-"+d;
+}
+function normalizeSessionDate(value){
+ const text=String(value??"");
+ if(!/^\d{4}-\d{2}-\d{2}$/.test(text))return "";
+ const date=new Date(text+"T00:00:00");
+ return Number.isNaN(date.getTime())||localDateKey(date)!==text?"":text;
+}
+function readSessionDate(){
+ const date=normalizeSessionDate(new URLSearchParams(window.location.search).get("date"));
+ return date||localDateKey();
+}
+function setSessionDateInUrl(date){
+ const url=new URL(window.location.href);
+ url.searchParams.set("date",date);
+ window.history.replaceState({}, "", url);
+}
+let sessionDate=readSessionDate();
+if(!new URLSearchParams(window.location.search).get("date"))setSessionDateInUrl(sessionDate);
+function sessionPath(code,date){return roomPath(code)+"/sessions/"+date;}
+function rosterPath(code){return roomPath(code)+"/roster/members";}
+function accessPath(code,uid){return roomPath(code)+"/access/"+uid;}
+function counterPath(code,scope,counterName){return roomPath(code)+"/counters/"+scope+"/"+counterName;}
+function changeSessionDate(value){
+ const date=normalizeSessionDate(value);
+ if(!date){alert("올바른 경기일을 선택해주세요.");return}
+ sessionDate=date;
+ setSessionDateInUrl(sessionDate);
+ window.location.reload();
+}
+function renderSessionPanel(){
+ return [
+  '<div class="sessionPanel">',
+  '<span class="sessionLabel">경기일</span>',
+  '<input class="sessionDateInput" type="date" value="'+esc(sessionDate)+'" onchange="changeSessionDate(this.value)">',
+  '</div>'
+ ].join("");
+}
 function inviteLink(){
  const url=new URL(window.location.href);
  url.searchParams.set("invite",inviteCode);
@@ -237,9 +284,9 @@ let players=[], courts=initCourts(2), overlap={}, tab="courts", overlapView="sum
 let newName="", newTier="B", newGender="M", isGuest=false, guestOf="", assigningCourtId=null, saveToRoster=true;
 let members=[], newMemberName="", newMemberTier="B", newMemberGender="M";
 let waitingGroups=[], isBuildingGroup=false, buildingGroupSelection=[];
-let nextId=1, memberNextId=1, groupNextId=1, loaded=false, gameRef=null;
+let loaded=false, gameRef=null, rosterRef=null, currentUser=null, authError="";
 
-function pairKey(a,b){return a<b?`${a}_${b}`:`${b}_${a}`}
+function pairKey(a,b){const aa=String(a),bb=String(b);return aa<bb?aa+"_"+bb:bb+"_"+aa}
 function combinations(arr,k){
  const result=[],combo=[];
  function helper(start){
@@ -250,18 +297,53 @@ function combinations(arr,k){
 }
 function formatElapsed(ms){const total=Math.max(0,Math.floor(ms/1000));const m=Math.floor(total/60),s=total%60;return `${m}:${String(s).padStart(2,"0")}`}
 function initCourts(n){return Array.from({length:n},(_,i)=>({id:i+1,playerIds:[],startTime:null,gameCount:0,nextPlayerIds:[]}))}
+async function allocateId(counterName,sessionScoped=true){
+ const fb=window.gameMatchingFirebase;
+ const scope=sessionScoped?sessionDate:"room";
+ if(!fb?.runTransaction||!fb?.firebaseDB)return Date.now()+Math.floor(Math.random()*1000);
+ const counterRef=fb.ref(fb.firebaseDB,counterPath(inviteCode,scope,counterName));
+ const result=await fb.runTransaction(counterRef,current=>{
+  const value=Number(current)||0;
+  return value+1;
+ });
+ return Number(result.snapshot.val());
+}
 async function save(){
- if(!loaded || !window.gameMatchingFirebase)return;
+ if(!loaded||!window.gameMatchingFirebase||!currentUser||!gameRef)return;
  const fb=window.gameMatchingFirebase;
  try{
-  if(!gameRef)gameRef=fb.ref(fb.firebaseDB,roomPath(inviteCode));
-  await fb.set(gameRef,{players,courts,overlap,members,waitingGroups});
+  await fb.update(gameRef,{
+   players,
+   courts,
+   overlap,
+   waitingGroups,
+   lastUpdatedBy:currentUser.uid,
+   lastUpdatedAt:Date.now()
+  });
  }catch(e){
-  console.error("Firebase 저장 실패:",e);
+  console.error("Firebase 경기 세션 저장 실패:",e);
+ }
+}
+async function saveRosterMember(member){
+ if(!loaded||!window.gameMatchingFirebase||!currentUser||!rosterRef||!member)return;
+ const fb=window.gameMatchingFirebase;
+ try{
+  await fb.update(rosterRef,{[String(member.id)]:member});
+ }catch(e){
+  console.error("Firebase 회원 저장 실패:",e);
+ }
+}
+async function removeRosterMember(id){
+ if(!loaded||!window.gameMatchingFirebase||!currentUser||!rosterRef)return;
+ const fb=window.gameMatchingFirebase;
+ try{
+  await fb.update(rosterRef,{[String(id)]:null});
+ }catch(e){
+  console.error("Firebase 회원 삭제 실패:",e);
  }
 }
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
-function player(id){return players.find(p=>p.id===id)}
+function player(id){return players.find(p=>String(p.id)===String(id))}
 function genderColor(p){return p&&GENDER_COLOR[p.gender]||INK}
 function tierBadge(p,small=false){return `<span class="${small?"tierBadgeSm":"tierBadge"}" style="color:${TIER_COLOR[p.tier]||MUTED}">${esc(p.tier)}</span>`}
 function statusBadge(s){return `<span class="badge ${s}">${STATUS_LABEL[s]}</span>`}
@@ -330,17 +412,29 @@ function finalizeAssignment(courtId,fourPlayers){
  players=players.map(p=>ids.includes(p.id)?{...p,status:"playing",courtId}:p);
  assigningCourtId=null;save();render();
 }
+function tierRank(p){return TIER_RANK[p?.tier]??0}
+function matchCandidateScore(combo){
+ const games=combo.map(p=>Number(p.games)||0);
+ const gamesSum=games.reduce((s,n)=>s+n,0);
+ const gameSpread=Math.max(...games)-Math.min(...games);
+ let overlapSum=0;
+ for(let i=0;i<4;i++)for(let j=i+1;j<4;j++)overlapSum+=getOverlap(combo[i].id,combo[j].id);
+ const tiers=combo.map(tierRank);
+ const tierSpread=Math.max(...tiers)-Math.min(...tiers);
+ const maleCount=combo.filter(p=>p.gender==="M").length;
+ const femaleCount=combo.filter(p=>p.gender==="F").length;
+ const genderImbalance=Math.abs(maleCount-femaleCount);
+ const waitBonus=combo.reduce((s,p)=>s+Math.min(600,Math.max(0,(Date.now()-(p.waitSince||Date.now()))/1000)),0);
+ return gameSpread*120+gamesSum*8+overlapSum*35+tierSpread*25+genderImbalance*15-waitBonus;
+}
 function autoMatch(courtId){
  const waiting=players.filter(p=>p.status==="waiting");
  if(waiting.length<4){alert("대기 중인 선수가 4명 이상이어야 자동 배정할 수 있어요.");return}
  const sorted=[...waiting].sort((a,b)=>a.games-b.games||a.waitSince-b.waitSince);
- const pool=sorted.slice(0,Math.min(10,sorted.length)), combos=combinations(pool,4);
+ const pool=sorted.slice(0,Math.min(12,sorted.length)),combos=combinations(pool,4);
  let best=combos[0],bestScore=Infinity;
  for(const combo of combos){
-  const gamesSum=combo.reduce((s,p)=>s+p.games,0);
-  let overlapSum=0;
-  for(let i=0;i<4;i++)for(let j=i+1;j<4;j++)overlapSum+=getOverlap(combo[i].id,combo[j].id);
-  const score=gamesSum*1000+overlapSum;
+  const score=matchCandidateScore(combo);
   if(score<bestScore){bestScore=score;best=combo}
  }
  finalizeAssignment(courtId,best);
@@ -449,7 +543,7 @@ function getOverlap(a,b){return overlap[pairKey(a,b)]||0}
 function waitingPlayers(){return players.filter(p=>p.status==="waiting").sort((a,b)=>a.waitSince-b.waitSince)}
 function overlapRanking(){
  return Object.entries(overlap).map(([key,count])=>{
-  const [a,b]=key.split("_").map(Number),pa=player(a),pb=player(b);
+  const [a,b]=key.split("_"),pa=player(a),pb=player(b);
   return {a:pa,b:pb,count}
  }).filter(r=>r.a&&r.b&&r.count>0).sort((a,b)=>b.count-a.count)
 }
@@ -467,7 +561,7 @@ function render(){
  <div class="page">
   <div class="header">
    <div class="headerLeft"><div class="shuttleIcon">🏸</div><div><div class="title">GameMatching</div><div class="subtitle">배드민턴 동호회 조 편성 &amp; 코트 현황</div></div></div>
-   <div class="headerActions">${renderInvitePanel()}
+   <div class="headerActions">${renderSessionPanel()}${renderInvitePanel()}
     <div class="courtCountGroup"><span class="courtCountLabel">코트 수</span>${[2,3,4].map(n=>`<button class="courtCountBtn ${courts.length===n?"active":""}" onclick="changeCourtCount(${n})">${n}</button>`).join("")}</div>
    </div>
   </div>
