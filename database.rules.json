@@ -1,0 +1,44 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "gamematching_v1": {
+      "rooms": {
+        "$roomCode": {
+          "access": {
+            "$uid": {
+              ".read": "auth != null && auth.uid === $uid",
+              ".write": "auth != null && auth.uid === $uid && newData.child('uid').val() === auth.uid && newData.child('roomCode').val() === $roomCode",
+              ".validate": "newData.hasChildren(['uid','roomCode','joinedAt']) && newData.child('uid').val() === auth.uid && newData.child('roomCode').val() === $roomCode && newData.child('joinedAt').isNumber()"
+            }
+          },
+          "sessions": {
+            "$sessionDate": {
+              ".read": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists()",
+              ".write": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists() && newData.child('lastUpdatedBy').val() === auth.uid",
+              ".validate": "newData.hasChildren(['players','courts','overlap','waitingGroups','lastUpdatedBy','lastUpdatedAt']) && newData.child('lastUpdatedBy').isString() && newData.child('lastUpdatedAt').isNumber()"
+            }
+          },
+          "roster": {
+            "members": {
+              ".read": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists()",
+              "$memberId": {
+                ".write": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists()",
+                ".validate": "newData.hasChildren(['id','name','tier','gender'])"
+              }
+            }
+          },
+          "counters": {
+            "$scope": {
+              "$counterName": {
+                ".read": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists()",
+                ".write": "auth != null && root.child('gamematching_v1').child('rooms').child($roomCode).child('access').child(auth.uid).exists()",
+                ".validate": "newData.isNumber() && (data.val() == null || newData.val() >= data.val())"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
